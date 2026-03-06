@@ -1,0 +1,6 @@
+name: astrbot_plugin_ql
+display_name: 青龙面板管理
+desc: 通过聊天管理青龙面板
+version: v1.0.1
+author: back-101
+repo: https://github.com/back-101/astrbot_plugin_ql
