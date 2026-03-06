@@ -35,7 +35,7 @@ class QinglongAPI:
             return False
 
     async def _request(self, method: str, endpoint: str, params=None, json_data=None):
-        if not await self.get_token(): return False, "青龙认证失败，请检查配置"
+        if not await self.get_token(): return False, "认证失败"
         try:
             client = await self._get_client()
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
@@ -43,90 +43,100 @@ class QinglongAPI:
             res = resp.json()
             return (True, res.get('data', {})) if res.get('code') in [200, 201] else (False, res.get('message', '未知错误'))
         except Exception as e:
-            return False, f"网络异常: {str(e)}"
+            return False, str(e)
 
-@register("astrbot_plugin_qinglong", "Haitun", "青龙全能管家", "1.2.8")
+@register("astrbot_plugin_qinglong", "Haitun", "青龙全能管家", "1.2.9")
 class QinglongPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
+        # 强制读取你的配置文件，若无则使用默认
         self.ql_api = QinglongAPI(
-            config.get("qinglong_host", ""), # 默认使用你提供的IP
+            config.get("qinglong_host", ""),
             config.get("qinglong_client_id", ""),
             config.get("qinglong_client_secret", "")
         )
 
+    def _parse_ids(self, ids_str: str) -> List[int]:
+        """将 AI 传入的字符串 ID (如 '10,11' 或 '10') 转换为整数列表"""
+        if not ids_str: return []
+        try:
+            return [int(x.strip()) for x in str(ids_str).replace("，", ",").split(",") if x.strip().isdigit()]
+        except: return []
+
     # ==========================================
-    # AI工具 1：环境变量大师 (Env Expert)
+    # 工具 1：环境变量管理 (平坦化参数确保识别)
     # ==========================================
-    @filter.llm_tool(name="manage_envs")
-    async def manage_envs(self, event: AstrMessageEvent, action: str, ids: List[int] = None, name: str = "", value: str = "", remarks: str = ""):
+    @filter.llm_tool(name="ql_manage_env")
+    async def ql_manage_env(self, event: AstrMessageEvent, action: str, target_ids: str = "", name: str = "", value: str = "", remarks: str = ""):
         """
-        管理环境变量。action可选: search(查), add(增), update(改), delete(删), enable(启), disable(禁)。
+        管理青龙环境变量。
+        action: 'search'(查), 'add'(增), 'update'(改), 'delete'(删), 'enable'(启), 'disable'(禁)
+        target_ids: 目标ID，多个用逗号隔开，如 "10,11"
         """
-        if not event.is_admin: return "🚫 只有管理员才能动环境变量喔！"
-        if isinstance(ids, int): ids = [ids]
+        if not event.is_admin: return "🚫 权限不足。"
+        ids = self._parse_ids(target_ids)
 
         if action == "search":
             success, data = await self.ql_api._request("GET", "/open/envs", params={"searchValue": name or ""})
-            return "\n".join([f"ID:{e['id']} | {e['name']} | {'🟢启用' if e['status']==0 else '🔴禁用'}" for e in data[:15]]) if success else "未找到相关变量。"
+            if not success: return f"查询失败: {data}"
+            return "\n".join([f"ID:{e['id']} | {e['name']} | {'🟢启用' if e['status']==0 else '🔴禁用'}" for e in data[:15]]) or "未找到相关变量。"
         
         elif action == "add":
-            success, msg = await self.ql_api._request("POST", "/open/envs", json_data=[{"name": name, "value": value, "remarks": remarks or f"AI添加于{time.strftime('%m-%d')}"}])
-            return f"✅ 变量 `{name}` 已成功添加！" if success else f"❌ 失败: {msg}"
+            success, msg = await self.ql_api._request("POST", "/open/envs", json_data=[{"name": name, "value": value, "remarks": remarks or "AI添加"}])
+            return f"✅ 变量 {name} 添加成功" if success else f"❌ 失败: {msg}"
             
         elif action == "update" and ids:
             success, msg = await self.ql_api._request("PUT", "/open/envs", json_data={"id": ids[0], "name": name, "value": value, "remarks": remarks})
-            return f"✅ ID:{ids[0]} 更新完成！" if success else f"❌ 失败: {msg}"
+            return f"✅ 更新成功" if success else f"❌ 失败: {msg}"
             
         elif action in ["enable", "disable", "delete"]:
-            if not ids: return "请告诉我 ID 号。"
+            if not ids: return "需要提供 ID 号喔。"
             method = "DELETE" if action == "delete" else "PUT"
             endpoint = f"/open/envs/{action}" if method == "PUT" else "/open/envs"
             success, msg = await self.ql_api._request(method, endpoint, json_data=ids)
-            return f"✅ 变量 {action} 操作已执行。" if success else f"❌ 失败: {msg}"
+            return f"✅ 操作 {action} 已执行" if success else f"❌ 失败: {msg}"
 
     # ==========================================
-    # AI工具 2：任务调度专家 (Cron Expert)
+    # 工具 2：定时任务管理 (平坦化参数)
     # ==========================================
-    @filter.llm_tool(name="manage_crons")
-    async def manage_crons(self, event: AstrMessageEvent, action: str, ids: List[int] = None, keyword: str = ""):
+    @filter.llm_tool(name="ql_manage_cron")
+    async def ql_manage_cron(self, event: AstrMessageEvent, action: str, target_ids: str = "", keyword: str = ""):
         """
-        全权管理定时任务。action可选: search(查), run(跑), stop(停), enable(启), disable(禁), pin(置顶), unpin(取消置顶), delete(删), log(看日志)。
+        管理定时任务。
+        action: 'search'(查), 'run'(执行), 'stop'(停止), 'enable'(启), 'disable'(禁), 'pin'(置顶), 'unpin'(取消), 'delete'(删), 'log'(日志)
+        target_ids: 任务ID，多个用逗号隔开
         """
         if not event.is_admin: return "🚫 权限不足。"
-        if isinstance(ids, int): ids = [ids]
+        ids = self._parse_ids(target_ids)
 
         if action == "search":
             success, data = await self.ql_api._request("GET", "/open/crons", params={"searchValue": keyword})
             tasks = data.get('data', []) if isinstance(data, dict) else data
-            return "\n".join([f"ID:{t['id']} | {t['name']} | {'🟢' if t['status']==0 else '🔴'}" for t in tasks[:10]]) if success else "任务查询失败。"
+            return "\n".join([f"ID:{t['id']} | {t['name']} | {'🟢' if t['status']==0 else '🔴'}" for t in tasks[:10]]) if success else "查询失败"
         
         elif action == "log" and ids:
             success, log = await self.ql_api._request("GET", f"/open/crons/{ids[0]}/log")
-            return f"📄 任务 {ids[0]} 日志尾部：\n{log[-800:]}" if success else f"❌ 日志读取失败。"
+            return f"📄 日志尾部：\n{log[-600:]}" if success else "日志读取失败"
             
         elif action in ["run", "stop", "enable", "disable", "pin", "unpin", "delete"]:
-            if not ids: return "请告诉我任务 ID。"
+            if not ids: return "需要任务 ID。"
             method = "DELETE" if action == "delete" else "PUT"
-            endpoint = f"/open/crons/{action}" if action not in ["delete", "pin", "unpin"] else f"/open/crons/{action}"
-            # 特殊修正：删除、置顶、取消置顶的路径
+            # 路径映射修正
+            path_map = {"pin": "pin", "unpin": "unpin", "delete": ""}
+            endpoint = f"/open/crons/{path_map.get(action, action)}"
             if action == "delete": endpoint = "/open/crons"
             success, msg = await self.ql_api._request(method, endpoint, json_data=ids)
-            return f"✅ 任务 {action} 操作成功！" if success else f"❌ 失败: {msg}"
+            return f"✅ 任务 {action} 成功" if success else f"❌ 失败: {msg}"
 
     # ==========================================
-    # AI工具 3：系统信息 (System Info)
+    # 工具 3：系统查询
     # ==========================================
-    @filter.llm_tool(name="get_ql_system")
-    async def get_ql_system(self, event: AstrMessageEvent):
-        """查询青龙面板的版本和运行状态。"""
+    @filter.llm_tool(name="ql_get_sys_info")
+    async def ql_get_sys_info(self, event: AstrMessageEvent):
+        """查询青龙面板的版本和状态。"""
         success, data = await self.ql_api._request("GET", "/open/system")
-        if not success: return "系统信息获取失败。"
-        return f"🖥️ 青龙面板 v{data.get('version')}\n多机模式：{'开启' if data.get('is_cluster') else '关闭'}"
-
-    @filter.command("ql")
-    async def ql_help(self, event: AstrMessageEvent):
-        yield event.plain_result("🌟 青龙全能管家指令已解锁！\n你可以直接对我说：\n- '查找京东变量并禁用'\n- '运行脚本 520 并把日志发给我'\n- '把那个包含 BING 的任务置顶'\n- '当前青龙版本是多少？'")
+        if not success: return "获取失败。"
+        return f"🖥️ 青龙 v{data.get('version')} | 并发：{data.get('is_cluster')}"
 
     async def terminate(self):
         if self.ql_api._client: await self.ql_api._client.aclose()
